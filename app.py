@@ -1,301 +1,322 @@
 import streamlit as st
-import pandas as pd
-import matplotlib.pyplot as plt
-import numpy as np
-from datetime import datetime, timedelta
 import yfinance as yf
-import warnings
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.express as px
+from datetime import datetime, timedelta
 import io
-warnings.filterwarnings("ignore")
+import os
 
-# --- CONFIGURATION ---
-INDICES = {
-    "S&P 500": "^GSPC",
-    "NASDAQ 100": "^IXIC",
-    "Dow Jones": "^DJI",
-    "Russell 2000": "^RUT",
-    "VIX": "^VIX"
-}
+# --- Configuration de la page ---
+st.set_page_config(
+    page_title="Analyse Technique des Marchés",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-SECTORS = {
-    "Matériaux": "XLB",
-    "Communication": "XLC",
-    "Énergie": "XLE",
-    "Finance": "XLF",
-    "Industrie": "XLI",
-    "Technologie": "XLK",
-    "Consommation de base": "XLP",
-    "Utilities": "XLU",
-    "Santé": "XLV",
-    "Consommation discrétionnaire": "XLY",
-    "Immobilier": "XLRE"
-}
+# --- Styles CSS ---
+st.markdown("""
+<style>
+    .stSelectbox, .stDateInput, .stNumberInput {margin-bottom: 1rem;}
+    .metric-card {background-color: #f0f2f6; padding: 1rem; border-radius: 0.5rem; margin: 0.5rem 0;}
+    .positive {color: green;}
+    .negative {color: red;}
+</style>
+""", unsafe_allow_html=True)
 
-# --- FONCTIONS ---
+# --- Fonctions utilitaires ---
+@st.cache_data(ttl=3600)
 def fetch_data(symbols, period="5y", interval="1d"):
-    df = pd.DataFrame()
-    for name, symbol in symbols.items():
-        data = yf.download(symbol, period=period, interval=interval)
-        if not data.empty:
-            df[name] = data['Close']
+    """Récupère les données historiques pour une liste de symboles."""
+    data = {}
+    for symbol in symbols:
+        try:
+            stock = yf.Ticker(symbol)
+            df = stock.history(period=period, interval=interval)
+            if not df.empty:
+                df.index = df.index.tz_localize(None)  # Supprime le timezone
+                data[symbol] = df
+        except Exception as e:
+            st.error(f"Erreur pour {symbol}: {e}")
+    return data
+
+def calculate_ta(df):
+    """Calcule les indicateurs techniques."""
+    # SMA
+    df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    df['SMA_200'] = df['Close'].rolling(window=200).mean()
+
+    # RSI
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+
+    # MACD
+    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp1 - exp2
+    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['Histogram'] = df['MACD'] - df['Signal']
+
+    # Bollinger Bands
+    df['BB_upper'] = df['Close'].rolling(window=20).mean() + 2 * df['Close'].rolling(window=20).std()
+    df['BB_lower'] = df['Close'].rolling(window=20).mean() - 2 * df['Close'].rolling(window=20).std()
+
     return df
 
-def calculate_indicators(df):
-    new_df = df.copy()
-    for col in df.columns:
-        new_df[f"{col}_EMA9"] = df[col].ewm(span=9, adjust=False).mean()
-        new_df[f"{col}_SMA20"] = df[col].rolling(window=20).mean()
-        new_df[f"{col}_SMA50"] = df[col].rolling(window=50).mean()
-        new_df[f"{col}_SMA200"] = df[col].rolling(window=200).mean()
-        new_df[f"{col}_Momentum_5d"] = (df[col] / df[col].shift(5)) - 1
+def create_candlestick(df, title):
+    """Crée un graphique en chandeliers avec Plotly."""
+    fig = go.Figure(data=[go.Candlestick(
+        x=df.index,
+        open=df['Open'],
+        high=df['High'],
+        low=df['Low'],
+        close=df['Close'],
+        name='Prix'
+    )])
+    fig.update_layout(
+        title=title,
+        yaxis_title='Prix',
+        xaxis_rangeslider_visible=False,
+        height=500
+    )
+    return fig
 
-        delta = df[col].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        new_df[f"{col}_RSI"] = 100 - (100 / (1 + rs))
+def create_ta_chart(df, title):
+    """Crée un graphique avec SMA et Bollinger Bands."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['Close'],
+        name='Prix',
+        line=dict(color='blue')
+    ))
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['SMA_50'],
+        name='SMA 50',
+        line=dict(color='orange', dash='dash')
+    ))
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['SMA_200'],
+        name='SMA 200',
+        line=dict(color='red', dash='dash')
+    ))
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['BB_upper'],
+        name='BB Upper',
+        line=dict(color='gray', dash='dot')
+    ))
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['BB_lower'],
+        name='BB Lower',
+        line=dict(color='gray', dash='dot')
+    ))
+    fig.update_layout(
+        title=title,
+        yaxis_title='Prix',
+        height=500
+    )
+    return fig
 
-        ema12 = df[col].ewm(span=12, adjust=False).mean()
-        ema26 = df[col].ewm(span=26, adjust=False).mean()
-        new_df[f"{col}_MACD"] = ema12 - ema26
-        new_df[f"{col}_MACD_Signal"] = new_df[f"{col}_MACD"].ewm(span=9, adjust=False).mean()
-        new_df[f"{col}_MACD_Hist"] = new_df[f"{col}_MACD"] - new_df[f"{col}_MACD_Signal"]
+def create_rsi_chart(df, title):
+    """Crée un graphique RSI."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['RSI'],
+        name='RSI',
+        line=dict(color='purple')
+    ))
+    fig.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Surachat (70)")
+    fig.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Survente (30)")
+    fig.update_layout(
+        title=title,
+        yaxis_title='RSI',
+        yaxis_range=[0, 100],
+        height=300
+    )
+    return fig
 
-        new_df[f"{col}_BB_Middle"] = df[col].rolling(window=20).mean()
-        rolling_std = df[col].rolling(window=20).std()
-        new_df[f"{col}_BB_Upper"] = new_df[f"{col}_BB_Middle"] + (rolling_std * 2)
-        new_df[f"{col}_BB_Lower"] = new_df[f"{col}_BB_Middle"] - (rolling_std * 2)
-    return new_df
+def create_macd_chart(df, title):
+    """Crée un graphique MACD."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['MACD'],
+        name='MACD',
+        line=dict(color='blue')
+    ))
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['Signal'],
+        name='Signal',
+        line=dict(color='orange')
+    ))
+    fig.add_trace(go.Bar(
+        x=df.index,
+        y=df['Histogram'],
+        name='Histogram',
+        marker_color=np.where(df['Histogram'] > 0, 'green', 'red')
+    ))
+    fig.update_layout(
+        title=title,
+        yaxis_title='MACD',
+        height=300
+    )
+    return fig
 
-def analyze_trends(df):
-    latest = df.iloc[-1]
-    trends = {}
-    for name in df.columns:
-        if any(suffix in name for suffix in ["_EMA", "_SMA", "_Momentum", "_RSI", "_MACD", "_BB"]):
-            continue
-        price = latest[name]
-        if pd.isna(price):
-            continue
+# --- Données des indices et secteurs ---
+INDICES = {
+    "CAC40": "^FCHI",
+    "S&P500": "^GSPC",
+    "NASDAQ": "^IXIC",
+    "Euro Stoxx 50": "^STOXX50E",
+    "DAX": "^GDAXI",
+    "Nikkei 225": "^N225"
+}
 
-        if name == "S&P 500":
-            price *= 10; ema9 = latest.get(f"{name}_EMA9", float('nan')) * 10
-            sma20 = latest.get(f"{name}_SMA20", float('nan')) * 10
-            sma50 = latest.get(f"{name}_SMA50", float('nan')) * 10
-            sma200 = latest.get(f"{name}_SMA200", float('nan')) * 10
-            rsi = latest.get(f"{name}_RSI", float('nan'))
-            macd = latest.get(f"{name}_MACD", float('nan')) * 10
-            macd_signal = latest.get(f"{name}_MACD_Signal", float('nan')) * 10
-        elif name == "NASDAQ 100":
-            price *= 40; ema9 = latest.get(f"{name}_EMA9", float('nan')) * 40
-            sma20 = latest.get(f"{name}_SMA20", float('nan')) * 40
-            sma50 = latest.get(f"{name}_SMA50", float('nan')) * 40
-            sma200 = latest.get(f"{name}_SMA200", float('nan')) * 40
-            rsi = latest.get(f"{name}_RSI", float('nan'))
-            macd = latest.get(f"{name}_MACD", float('nan')) * 40
-            macd_signal = latest.get(f"{name}_MACD_Signal", float('nan')) * 40
-        elif name == "Dow Jones":
-            price *= 100; ema9 = latest.get(f"{name}_EMA9", float('nan')) * 100
-            sma20 = latest.get(f"{name}_SMA20", float('nan')) * 100
-            sma50 = latest.get(f"{name}_SMA50", float('nan')) * 100
-            sma200 = latest.get(f"{name}_SMA200", float('nan')) * 100
-            rsi = latest.get(f"{name}_RSI", float('nan'))
-            macd = latest.get(f"{name}_MACD", float('nan')) * 100
-            macd_signal = latest.get(f"{name}_MACD_Signal", float('nan')) * 100
-        elif name == "Russell 2000":
-            price *= 10; ema9 = latest.get(f"{name}_EMA9", float('nan')) * 10
-            sma20 = latest.get(f"{name}_SMA20", float('nan')) * 10
-            sma50 = latest.get(f"{name}_SMA50", float('nan')) * 10
-            sma200 = latest.get(f"{name}_SMA200", float('nan')) * 10
-            rsi = latest.get(f"{name}_RSI", float('nan'))
-            macd = latest.get(f"{name}_MACD", float('nan')) * 10
-            macd_signal = latest.get(f"{name}_MACD_Signal", float('nan')) * 10
-        else:
-            ema9 = latest.get(f"{name}_EMA9", float('nan'))
-            sma20 = latest.get(f"{name}_SMA20", float('nan'))
-            sma50 = latest.get(f"{name}_SMA50", float('nan'))
-            sma200 = latest.get(f"{name}_SMA200", float('nan'))
-            rsi = latest.get(f"{name}_RSI", float('nan'))
-            macd = latest.get(f"{name}_MACD", float('nan'))
-            macd_signal = latest.get(f"{name}_MACD_Signal", float('nan'))
+SECTEURS = {
+    "Technologie": ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA"],
+    "Santé": ["JNJ", "UNH", "PFE", "ABBV", "MRK"],
+    "Énergie": ["XOM", "CVX", "COP", "SLB", "EOG"],
+    "Finance": ["JPM", "BAC", "WFC", "GS", "MS"],
+    "Consommation": ["PG", "KO", "PEP", "WMT", "COST"],
+    "Industrie": ["BA", "CAT", "MMM", "GE", "HON"]
+}
 
-        trends[name] = {
-            "Prix": round(price, 2),
-            "> EMA9": "✅" if not pd.isna(ema9) and price > ema9 else "❌",
-            "> SMA20": "✅" if not pd.isna(sma20) and price > sma20 else "❌",
-            "> SMA50": "✅" if not pd.isna(sma50) and price > sma50 else "❌",
-            "> SMA200": "✅" if not pd.isna(sma200) and price > sma200 else "❌",
-            "RSI": f"{round(rsi, 2) if not pd.isna(rsi) else 'N/A'}",
-            "RSI_Surachat": "✅" if not pd.isna(rsi) and rsi > 70 else "❌",
-            "RSI_Survente": "✅" if not pd.isna(rsi) and rsi < 30 else "❌",
-            "MACD_Achat": "✅" if not pd.isna(macd) and not pd.isna(macd_signal) and macd > macd_signal else "❌",
-            "BB_Position": f"{(price - (latest.get(f'{name}_BB_Lower', float('nan')))) / ((latest.get(f'{name}_BB_Upper', float('nan'))) - (latest.get(f'{name}_BB_Lower', float('nan')))) * 100:.1f}%" if not pd.isna(latest.get(f"{name}_BB_Upper", float('nan'))) and not pd.isna(latest.get(f"{name}_BB_Lower", float('nan'))) else "N/A"
-        }
-    return pd.DataFrame(trends).T
+# --- Sidebar ---
+st.sidebar.title("⚙️ Paramètres")
+st.sidebar.markdown("---")
 
-def generate_excel(df_indices, trends):
-    from openpyxl import Workbook
-    from openpyxl.drawing.image import Image
-    import os
-
-    os.makedirs("output", exist_ok=True)
-    wb = Workbook()
-
-    # Feuille Tendances
-    ws_tendances = wb.active
-    ws_tendances.title = "Tendances"
-    trends_reset = trends.reset_index()
-    trends_reset.rename(columns={'index': 'Indice/Secteur'}, inplace=True)
-    for c in range(len(trends_reset.columns)):
-        ws_tendances.cell(row=1, column=c+1, value=trends_reset.columns[c])
-    for r in range(len(trends_reset)):
-        for c in range(len(trends_reset.columns)):
-            ws_tendances.cell(row=r+2, column=c+1, value=trends_reset.iloc[r, c])
-
-    # Feuille Données
-    ws_donnees = wb.create_sheet("Données")
-    for r in range(len(df_indices.index) + 1):
-        for c in range(len(df_indices.columns) + 1):
-            if r == 0:
-                ws_donnees.cell(row=r+1, column=c+1, value=df_indices.columns[c-1] if c > 1 else df_indices.index.name)
-            else:
-                ws_donnees.cell(row=r+1, column=c+1, value=df_indices.iloc[r-1, c-1] if c > 1 else str(df_indices.index[r-1]))
-
-    wb.save("output/rapport_marche.xlsx")
-    return "output/rapport_marche.xlsx"
-
-# --- INTERFACE STREAMLIT ---
-st.title("📈 Analyse Technique des Marchés")
-st.markdown("---")
-
-# Sélecteur de période
-period = st.selectbox(
+# Sélection de la période
+period = st.sidebar.selectbox(
     "Période",
     ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "max"],
     index=6  # 5y par défaut
 )
 
-# Charge les données
+# Sélection du type d'analyse
+analysis_type = st.sidebar.radio(
+    "Type d'analyse",
+    ["Indices", "Secteurs"]
+)
+
+# Sélection des symboles
+if analysis_type == "Indices":
+    selected_symbols = st.sidebar.multiselect(
+        "Sélectionne les indices",
+        list(INDICES.keys()),
+        default=["CAC40", "S&P500"]
+    )
+    symbols = [INDICES[s] for s in selected_symbols]
+else:
+    selected_sectors = st.sidebar.multiselect(
+        "Sélectionne les secteurs",
+        list(SECTEURS.keys()),
+        default=["Technologie"]
+    )
+    symbols = []
+    for sector in selected_sectors:
+        symbols.extend(SECTEURS[sector])
+
+# --- Chargement des données ---
+if not symbols:
+    st.warning("Veuillez sélectionner au moins un indice ou secteur.")
+    st.stop()
+
 with st.spinner("Chargement des données..."):
-    df_indices = fetch_data(INDICES, period=period, interval="1d")
-    df_sectors = fetch_data(SECTORS, period=period, interval="1d")
+    data = fetch_data(symbols, period=period)
 
-    df_indices = calculate_indicators(df_indices)
-    df_sectors = calculate_indicators(df_sectors)
+if not data:
+    st.error("Aucune donnée disponible pour les symboles sélectionnés.")
+    st.stop()
 
-    trends_indices = analyze_trends(df_indices)
-    trends_sectors = analyze_trends(df_sectors)
+# --- Calcul des indicateurs techniques ---
+for symbol in data:
+    data[symbol] = calculate_ta(data[symbol])
 
-# Onglets
-tab1, tab2, tab3 = st.tabs(["📊 Tendances", "📈 Graphiques", "🔍 Analyse"])
+# --- Affichage principal ---
+st.title("📊 Analyse Technique des Marchés")
+st.markdown(f"**Période:** {period} | **Type:** {analysis_type}")
 
-with tab1:
-    st.subheader("Tendances des Indices")
-    st.dataframe(trends_indices, width='stretch')
+# --- Onglets pour chaque symbole ---
+for symbol, df in data.items():
+    with st.expander(f"📈 {symbol}", expanded=True):
+        col1, col2 = st.columns([2, 1])
 
-    st.subheader("Tendances des Secteurs")
-    st.dataframe(trends_sectors, width='stretch')
+        with col1:
+            # Graphique principal (Prix + SMA + BB)
+            ta_fig = create_ta_chart(df, f"{symbol} - Prix et Indicateurs")
+            st.plotly_chart(ta_fig, use_container_width=True)
 
-    # Bouton pour exporter en Excel
-    if st.button("📥 Exporter en Excel"):
-        excel_file = generate_excel(df_indices, pd.concat([trends_indices, trends_sectors]))
-        with open(excel_file, "rb") as f:
-            st.download_button(
-                label="Télécharger le rapport Excel",
-                data=f,
-                file_name="rapport_marche.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            # Graphiques RSI et MACD
+            rsi_fig = create_rsi_chart(df, f"{symbol} - RSI")
+            macd_fig = create_macd_chart(df, f"{symbol} - MACD")
+            st.plotly_chart(rsi_fig, use_container_width=True)
+            st.plotly_chart(macd_fig, use_container_width=True)
 
-with tab2:
-    # Sélecteur: Indices ou Secteurs
-    data_type = st.radio("Afficher :", ["Indices", "Secteurs"], horizontal=True)
+        with col2:
+            # Métriques
+            st.markdown("### 📊 Métriques Clés")
+            last_row = df.iloc[-1]
+            current_price = last_row['Close']
+            sma_50 = last_row['SMA_50']
+            sma_200 = last_row['SMA_200']
+            rsi = last_row['RSI']
 
-    if data_type == "Indices":
-        selected = st.selectbox("Sélectionne un indice", list(INDICES.keys()))
-        df = df_indices
-        name = selected
-    else:
-        selected = st.selectbox("Sélectionne un secteur", list(SECTORS.keys()))
-        df = df_sectors
-        name = selected
+            # Signal Bullish/Bearish
+            if current_price > sma_50 > sma_200:
+                signal = "🟢 **Bullish**"
+                signal_color = "green"
+            elif current_price < sma_50 < sma_200:
+                signal = "🔴 **Bearish**"
+                signal_color = "red"
+            else:
+                signal = "🟡 **Neutre**"
+                signal_color = "orange"
 
-    if name in df.columns:
-        # Graphique 1: Prix + SMA
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(df.index, df[name], label=name, color='blue')
-        if f"{name}_SMA20" in df.columns:
-            ax.plot(df.index, df[f"{name}_SMA20"], "--", label="SMA20", color='orange')
-        if f"{name}_SMA50" in df.columns:
-            ax.plot(df.index, df[f"{name}_SMA50"], "-.", label="SMA50", color='green')
-        if f"{name}_SMA200" in df.columns:
-            ax.plot(df.index, df[f"{name}_SMA200"], ":", label="SMA200", color='red')
-        ax.set_title(f"{name} - Prix et Moyennes Mobiles")
-        ax.legend()
-        ax.grid()
-        st.pyplot(fig)
+            st.markdown(f"""
+            <div class="metric-card">
+                <h4>Prix actuel</h4>
+                <p>{current_price:.2f}</p>
+                <h4>SMA 50</h4>
+                <p>{sma_50:.2f}</p>
+                <h4>SMA 200</h4>
+                <p>{sma_200:.2f}</p>
+                <h4>RSI</h4>
+                <p>{rsi:.2f}</p>
+                <h4>Signal</h4>
+                <p style="color:{signal_color};">{signal}</p>
+            </div>
+            """, unsafe_allow_html=True)
 
-        # Graphique 2: RSI
-        if f"{name}_RSI" in df.columns:
-            fig, ax = plt.subplots(figsize=(10, 3))
-            ax.plot(df.index, df[f"{name}_RSI"], label="RSI(14)", color='purple')
-            ax.axhline(70, color='red', linestyle='--', label="Surachat (70)")
-            ax.axhline(30, color='green', linestyle='--', label="Survente (30)")
-            ax.set_title(f"{name} - RSI(14)")
-            ax.legend()
-            ax.grid()
-            ax.set_ylim(0, 100)
-            st.pyplot(fig)
+            # Surachat/Survente
+            if rsi > 70:
+                st.markdown("<p style='color:red;'>⚠️ **Surachat (RSI > 70)**</p>", unsafe_allow_html=True)
+            elif rsi < 30:
+                st.markdown("<p style='color:green;'>⚠️ **Survente (RSI < 30)**</p>", unsafe_allow_html=True)
 
-        # Graphique 3: MACD
-        if f"{name}_MACD" in df.columns:
-            fig, ax = plt.subplots(figsize=(10, 4))
-            ax.plot(df.index, df[f"{name}_MACD"], label="MACD", color='blue')
-            ax.plot(df.index, df[f"{name}_MACD_Signal"], label="Signal", color='orange')
-            ax.bar(df.index, df[f"{name}_MACD_Hist"],
-                   label="Histogramme", color=np.where(df[f"{name}_MACD_Hist"] > 0, 'g', 'r'), alpha=0.3)
-            ax.set_title(f"{name} - MACD(12,26,9)")
-            ax.legend()
-            ax.grid()
-            st.pyplot(fig)
-
-        # Graphique 4: Bollinger Bands
-        if f"{name}_BB_Upper" in df.columns:
-            fig, ax = plt.subplots(figsize=(10, 4))
-            ax.plot(df.index, df[name], label="Prix", color='blue')
-            ax.plot(df.index, df[f"{name}_BB_Upper"], label="Bande Supérieure", color='green', linestyle='--')
-            ax.plot(df.index, df[f"{name}_BB_Middle"], label="Bande Moyenne", color='orange')
-            ax.plot(df.index, df[f"{name}_BB_Lower"], label="Bande Inférieure", color='red', linestyle='--')
-            ax.set_title(f"{name} - Bollinger Bands(20,2)")
-            ax.legend()
-            ax.grid()
-            st.pyplot(fig)
-
-with tab3:
-    st.subheader("Secteurs Bullish/Beash")
-    bullish_sectors = trends_sectors[trends_sectors["> SMA20"] == "✅"].index.tolist()
-    bearish_sectors = trends_sectors[trends_sectors["> SMA20"] == "❌"].index.tolist()
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**🟢 Secteurs BULLISH (au-dessus SMA20)**")
-        for sector in bullish_sectors:
-            st.markdown(f"- {sector}")
-    with col2:
-        st.markdown("**🔴 Secteurs BEARISH (en dessous SMA20)**")
-        for sector in bearish_sectors:
-            st.markdown(f"- {sector}")
-
-    st.markdown("---")
-    st.subheader("Signaux RSI")
-    overbought = trends_sectors[trends_sectors["RSI_Surachat"] == "✅"].index.tolist()
-    oversold = trends_sectors[trends_sectors["RSI_Survente"] == "✅"].index.tolist()
-
-    col3, col4 = st.columns(2)
-    with col3:
-        st.markdown("**🔴 Surachat (RSI > 70)**")
-        for sector in overbought:
-            st.markdown(f"- {sector}")
-    with col4:
-        st.markdown("**🟢 Survente (RSI < 30)**")
-        for sector in oversold:
-            st.markdown(f"- {sector}")
+# --- Export Excel ---
+st.markdown("---")
+st.markdown("### 📥 Export des données")
+if st.button("Exporter vers Excel"):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        for symbol, df in data.items():
+            df.to_excel(writer, sheet_name=symbol[:31])  # Limite de 31 caractères pour Excel
+    output.seek(0)
+    st.download_button(
+        label="Télécharger le fichier Excel",
+        data=output,
+        file_name=f"analyse_marches_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
